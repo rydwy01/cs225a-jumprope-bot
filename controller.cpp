@@ -119,6 +119,7 @@ int main() {
 	joint_task->disableInternalOtg();
 	VectorXd q_desired = robot->q();
 	joint_task->setGains(400, 40, 0); //18x1 vector for each joint DoF in RADIANS
+    // first 6 elements are underactuated: 3 prismatic, 3 rotation. other 12 are joints rotation angles.
 	joint_task->setGoalPosition(q_desired);
     // cout << q_desired;
 	// get starting poses
@@ -150,10 +151,10 @@ int main() {
 		robot->updateModel();
         state = redis_client.getInt(KEYBOARD_KEY);
         // cout << state;
-		if (state == POSTURE) {
+		if (state == POSTURE) { // initial neutral position FULLY ACTUATED
 			// update task model 
 			N_prec.setIdentity(); //previous nullspace = all ones == takes priority 1 since in all spaces
-			joint_task->updateTaskModel(N_prec); // 
+			joint_task->updateTaskModel(N_prec); // sets joint task as highest priority
 
 			command_torques = joint_task->computeTorques();
             body_rot = robot->rotation(body_name);
@@ -188,14 +189,23 @@ int main() {
             N_prec = body_task->getTaskAndPreviousNullspace();
                 
             // redundancy completion 
+
             joint_task->updateTaskModel(N_prec);
 
             // -------- set task goals and compute control torques
             command_torques.setZero();
 
             // body_task->setGoalPosition(body_pos + Vector3d(0, 0, 0.1 * sin(2 * M_PI * time)));//GOAL POSITION SETTING
+            
             Vector3d goalPos = Vector3d(0,0,0.2);
-            body_task->setGoalPosition(goalPos);//GOAL POSITION SETTING
+            if (abs(body_pos(2) - goalPos(2)) > 1e-1)  {
+                body_task->setGoalPosition(body_pos-Vector3d(0,0,0.05));//GOAL POSITION SETTING
+                Matrix3d neutralOrientation = Matrix3d::Identity();
+                Vector3d zeroAng = Vector3d::Zero();
+                body_task->setGoalOrientation(initial_rot);//GOAL ORIENTATION SETTING
+            } else  {
+                body_task->setGoalPosition(body_pos);
+            }
             
             command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
             command_torques = U.transpose() * UNr_bar.transpose() * command_torques;  // project underactuation 
@@ -232,16 +242,18 @@ int main() {
             command_torques.setZero();
 
             
-            
+            // body_task->setPosControlGains(200, 40, 0);
+            // body_task->setOriControlGains(200, 40, 0);
             // body_task->setGoalPosition(body_pos + Vector3d(0, 0, 0.1 * sin(2 * M_PI * time)));//GOAL POSITION SETTING
-            body_task->setGoalPosition(Vector3d(0,0,1));//GOAL POSITION SETTING
-            
+            body_task->setGoalPosition(Vector3d(0,0,0.8));//GOAL POSITION SETTING
+            body_task->setGoalOrientation(initial_rot);//GOAL ORIENTATION SETTING
+
             command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
             command_torques = U.transpose() * UNr_bar.transpose() * command_torques;  // project underactuation 
 
             body_vel = robot->linearVelocity(body_name,pos_in_body);
             double desired_launch_vel = 0.5;
-            if (abs(body_vel[2]-desired_launch_vel) < 0.1)  {
+            if (abs(body_vel[2]-desired_launch_vel) < 0.01)  {
                 cout << "launched";
                 // state = FLIGHT;
             }
