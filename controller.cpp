@@ -87,6 +87,20 @@ int main() {
     Matrix3d body_rot = Matrix3d::Identity();
     Matrix3d initial_rot = Matrix3d::Identity();
     initial_rot = robot->rotation(body_name);
+    Matrix3d neutralOrientation = Matrix3d::Identity();
+
+
+    // Vector3d randomTest = Vector3d::Random();
+        // Vector3d randomTest = Vector3d(0.2,0.2,0.2); //orientatoin control doesn't work?
+
+    // cout << randomTest << "\n";
+    // Matrix3d randomMatDiag = Matrix3d::Zero();
+    // randomMatDiag << cos(0.2), 0.0, sin(0.2), 0, 1, 0, -sin(0.2), 0, cos(0.2);
+    // randomMatDiag << 0.883, -0.211, 0.419, 0.321, 0.923, -0.211, -0.342, 0.321, 0.883;
+    // randomMatDiag = randomTest.asDiagonal();
+    
+    // cout << randomTest << "\n";
+    // cout << randomMatDiag << "\n";
 
 	// create map for feet task 
     std::map<std::string, std::shared_ptr<Sai2Primitives::MotionForceTask>> primary_tasks;
@@ -118,6 +132,8 @@ int main() {
 	auto joint_task = std::make_shared<Sai2Primitives::JointTask>(robot);
 	joint_task->disableInternalOtg();
 	VectorXd q_desired = robot->q();
+
+    VectorXd q_flight = robot->q();
 	joint_task->setGains(400, 40, 0); //18x1 vector for each joint DoF in RADIANS
     // first 6 elements are underactuated: 3 prismatic, 3 rotation. other 12 are joints rotation angles.
 	joint_task->setGoalPosition(q_desired);
@@ -134,12 +150,16 @@ int main() {
         // cout << current_pose.linear();
         primary_starting_pose.push_back(current_pose); //appends current pose to primary starting pose
     }
-    // cout << primary_starting_pose;
+    // cout << primary_starting_pose[0].translation()[0];
+    // cout << primary_starting_pose[0].translation()(1);
+    // cout << primary_starting_pose[0].translation()[2];
 
 	// create a loop timer
 	runloop = true;
 	double control_freq = 1000;
 	Sai2Common::LoopTimer timer(control_freq, 1e6);
+
+    
 
 	while (runloop) {
 		timer.waitForNextLoop();
@@ -173,6 +193,8 @@ int main() {
 			}
 		} else if (state == FEET_FIXED_MOTION) { //crouching
             // get underactuation matrix
+
+            //creates nullspace of feet matrix so that feet don't move
             MatrixXd Jr = MatrixXd::Zero(3 * 4, robot->dof()); //jacobian of feet contacts. 3 translation directions * 4 feet
             for (int i = 0; i < 4; ++i) {
                 Jr.block(3 * i, 0, 3, robot->dof()) = robot->Jv(primary_control_links[i], primary_control_points[i]);
@@ -184,27 +206,31 @@ int main() {
                                     (UNr_pre_inverse).completeOrthogonalDecomposition().pseudoInverse();
 
             // update body task
-            N_prec.setIdentity();
+            N_prec.setIdentity(); 
             body_task->updateTaskModel(N_prec);
+
+
             N_prec = body_task->getTaskAndPreviousNullspace();
                 
             // redundancy completion 
-
             joint_task->updateTaskModel(N_prec);
+
+            //joint_task->updateTaskModel(N_prec);
 
             // -------- set task goals and compute control torques
             command_torques.setZero();
 
             // body_task->setGoalPosition(body_pos + Vector3d(0, 0, 0.1 * sin(2 * M_PI * time)));//GOAL POSITION SETTING
             
-            Vector3d goalPos = Vector3d(0,0,0.2);
-            if (abs(body_pos(2) - goalPos(2)) > 1e-1)  {
+            Vector3d goalPos = Vector3d(0,0,0.22);
+            if (abs(body_pos(2) - goalPos(2)) > 1e-1 )  {
                 body_task->setGoalPosition(body_pos-Vector3d(0,0,0.05));//GOAL POSITION SETTING
-                Matrix3d neutralOrientation = Matrix3d::Identity();
-                Vector3d zeroAng = Vector3d::Zero();
-                body_task->setGoalOrientation(initial_rot);//GOAL ORIENTATION SETTING
+                // Vector3d zeroAng = Vector3d::Zero();
+                
+                body_task->setGoalOrientation(neutralOrientation);//GOAL ORIENTATION SETTING
             } else  {
-                body_task->setGoalPosition(body_pos);
+                body_task->setGoalPosition(Vector3d(0,0,body_pos(2)));
+                body_task->setGoalOrientation(neutralOrientation);
             }
             
             command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
@@ -213,7 +239,7 @@ int main() {
 
             // cout << body_pos;
             if (abs(body_pos(2) - goalPos(2)) < 1e-1)  {
-                cout << "crouched";
+                // cout << "crouched";
                 // state = LAUNCH;
             }
 
@@ -230,8 +256,13 @@ int main() {
             MatrixXd UNr_bar = robot->MInv() * UNr.transpose() * \
                                     (UNr_pre_inverse).completeOrthogonalDecomposition().pseudoInverse();
 
+            body_pos = robot->position("body", Vector3d(0, 0, 0));
+            body_vel = robot->linearVelocity(body_name,pos_in_body);
+
+
             // update body task
             N_prec.setIdentity();
+            // cout << N_prec.rows();
             body_task->updateTaskModel(N_prec);
             N_prec = body_task->getTaskAndPreviousNullspace();
                 
@@ -245,42 +276,102 @@ int main() {
             // body_task->setPosControlGains(200, 40, 0);
             // body_task->setOriControlGains(200, 40, 0);
             // body_task->setGoalPosition(body_pos + Vector3d(0, 0, 0.1 * sin(2 * M_PI * time)));//GOAL POSITION SETTING
-            body_task->setGoalPosition(Vector3d(0,0,0.8));//GOAL POSITION SETTING
+            body_task->setGoalPosition(Vector3d(0,0,0.8));//GOAL POSITION SETTING needs tweaking
             body_task->setGoalOrientation(initial_rot);//GOAL ORIENTATION SETTING
 
             command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
             command_torques = U.transpose() * UNr_bar.transpose() * command_torques;  // project underactuation 
-
-            body_vel = robot->linearVelocity(body_name,pos_in_body);
+            
+            
             double desired_launch_vel = 0.5;
             if (abs(body_vel[2]-desired_launch_vel) < 0.01)  {
                 cout << "launched";
                 // state = FLIGHT;
+                q_flight = robot->q();
             }
 
         } else if (state == FLIGHT) {
             // update primary task model
-            N_prec.setIdentity();
-            for (auto it = primary_tasks.begin(); it != primary_tasks.end(); ++it) {
-                it->second->updateTaskModel(N_prec);
-                // N_prec = it->second->getTaskAndPreviousNullspace();
-            }
-                
-            // redundancy completion 
-            joint_task->updateTaskModel(N_prec);
+            // N_prec.setIdentity();
 
-            // -------- set task goals and compute control torques
-            command_torques.setZero();
+            MatrixXd bodyJac = robot->Jv(body_name,body_pos);
+            MatrixXd bodyNull =robot->nullspaceMatrix(bodyJac);
+            MatrixXd U_bodyNull = U*bodyNull;
+            MatrixXd U_bodyNull_preInv = U_bodyNull*robot->MInv()*bodyNull.transpose();
+            MatrixXd U_bodyNull_bar = robot->MInv()*U_bodyNull.transpose() * \
+                                    (U_bodyNull_preInv).completeOrthogonalDecomposition().pseudoInverse();
 
-            int i = 0;
-            for (auto name : primary_control_links) {
-                primary_tasks[name]->setGoalPosition(primary_starting_pose[i].translation());
-                // primary_tasks[name]->setGoalOrientation();
-                command_torques += primary_tasks[name]->computeTorques();
-                ++i;
-            }
+
             
+
+            
+            body_pos = robot->position("body", Vector3d(0, 0, 0));
+            body_vel = robot->linearVelocity(body_name,pos_in_body);
+            // MatrixXd UNr_pre_inverse = UNr * robot->MInv() * UNr.transpose();
+            // MatrixXd UNr_bar = robot->MInv() * UNr.transpose() * \
+            //                         (UNr_pre_inverse).completeOrthogonalDecomposition().pseudoInverse();
+            N_prec.setIdentity();
+            joint_task->updateTaskModel(N_prec);
+            N_prec = joint_task->getTaskAndPreviousNullspace();
+            body_task->updateTaskModel(N_prec);
+
+            joint_task->setGoalPosition(q_desired);
+            //**********************************
+            // for (auto it = primary_tasks.begin(); it != primary_tasks.end(); ++it) {
+            //     it->second->updateTaskModel(N_prec); // set priority on primary tasks--it = iteration, second = task object
+            //     // N_prec = it->second->getTaskAndPreviousNullspace();
+            // }
+
+
+            // for (auto it = primary_tasks.begin(); it != primary_tasks.end(); ++it) {
+            //     // it->second->updateTaskModel(N_prec); // set priority on primary tasks--it = iteration, second = task object
+            //     N_prec = it->second->getTaskAndPreviousNullspace(); //update all N_prec with primary priorities
+            //     body_task->updateTaskModel(N_prec); // update body task to be in null space of ith primary task
+            // }
+           
+            
+            // N_prec = body_task->getTaskAndPreviousNullspace();
+                
+            // // redundancy completion 
+            // joint_task->updateTaskModel(N_prec);
+
+            // // for (auto name : primary_control_links) {
+            // //     primary_tasks[name]->updateTaskModel(N_prec);
+
+            // // }
+            
+            // // for (auto name : primary_control_links) {
+            // //     N_prec = N_prec * primary_tasks[name]->getTaskAndPreviousNullspace();
+
+            // // }
+            // // N_prec = joint_task->getTaskAndPreviousNullspace(); //HEREEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+            // // body_task->updateTaskModel(N_prec);
+            // // redundancy completion 
+
+            // //we want joint task now to be highest priority
+            // // -------- set task goals and compute control torques
+            // command_torques.setZero();
+//******************************************************************************
+            // int i = 0;
+            // for (auto name : primary_control_links) {
+            //     // primary_tasks[name]->setGoalPosition(primary_starting_pose[i].translation());
+            //     Vector3d leg_position = Vector3d(primary_starting_pose[i].translation());
+            //     // leg_position.z() = 
+            //     // Vector3d leg_position = Vector3d(primary_starting_pose[i].translation()(0), primary_starting_pose[i].translation()(1),body_pos(2)-0.3 );
+            //     primary_tasks[name]->setGoalPosition(leg_position);
+            //     // cout << body_pos(2);
+                
+                
+            //     // primary_tasks[name]->setGoalOrientation();
+            //     command_torques += primary_tasks[name]->computeTorques();
+            //     ++i;
+            // }
+
+            // body_task->setGoalOrientation(initial_rot);
+            // command_torques += joint_task->computeTorques();
             command_torques += joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
+            command_torques = U.transpose() * command_torques; //project robot underactuation matrix
+            // command_torques.setZero();
         }
 
 		// execute redis write callback
