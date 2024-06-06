@@ -27,14 +27,67 @@ void sighandler(int) { runloop = false; }
 const string robot_file = "./resources/spot.urdf";
 const string body_name = "body";
 const Vector3d pos_in_body = Vector3d(0.0, 0.0, 0.0);
+
+
+double initial_height = 0.0;
+double initial_velocity = 0.0;
+double launch_start_time = 0.0;
+bool launch_initialized = false;
+
 // States
 enum State
 {
     POSTURE = 0,
     FEET_FIXED_MOTION,
     LAUNCH,
-    FLIGHT
+    FLIGHT,
+    FALL
 };
+
+
+Vector3d getTraj(string trajType, double tStart, double tCurrent, double tLength, Vector3d initialPos, Vector3d initialVel, Vector3d finalPos, Vector3d finalVel){
+
+    Vector3d traj;
+    double slope;
+    if(trajType == "linearPos"){
+        if(tCurrent<=tLength+tStart){
+            for(int i=0; i<=2; i++){
+                slope = (initialPos(i)-finalPos(i))/(-tLength);
+                traj(i) = slope*(tCurrent-tStart)+initialPos(i);
+            }
+        }
+        else{
+            traj = finalPos;
+        }
+
+    }
+
+    if(trajType == "linearVel"){
+        if(tCurrent<=tLength+tStart){
+            for(int i=0; i<=2; i++){
+                slope = (initialVel(i)-finalVel(i))/(-tLength);
+                traj(i) = slope*(tCurrent-tStart)+initialVel(i);
+            }
+        }
+        else{
+            traj = finalVel;
+        }
+
+    }
+
+    // if(trajType == "linearOri"){
+    //     if(tCurrent<=tLength){
+    //         for(i=0; i<=2; i++){
+    //             slope = (initialOri(i)-finalOri(i))/(tLength);
+    //             traj(i) = slope*(tCurrent-tStart)+initialOri(i);
+    //         }
+    //     }
+    //     else{
+    //         traj = finalOri;
+    //     }
+    // }
+    return traj;
+}
 
 int main()
 {
@@ -43,6 +96,25 @@ int main()
     // initial state
     // int state = POSTURE;
     string controller_status = "1";
+
+
+
+
+    Vector3d traj;
+
+    bool startToggleFeetFixedMotion = true;
+    bool startToggleLaunch = true;
+    double startTime = 0;
+    Vector3d initialPos;
+    Vector3d initialVel;
+    Vector3d initialOri;
+
+    Vector3d goalPos;
+    Vector3d goalVel;
+
+
+
+
 
     // start redis client
     auto redis_client = Sai2Common::RedisClient();
@@ -138,9 +210,17 @@ int main()
     VectorXd q_desired = robot->q();
     VectorXd q_initial = robot->q();
     VectorXd q_flight = robot->q();
+    VectorXd q_land = robot->q();
 
     VectorXd q_joints = q_initial.tail(12);
     q_joints << 0, M_PI/4, -M_PI/2, 0, M_PI/4, -M_PI/2, 0, M_PI/4, -M_PI/2, 0, M_PI/4, -M_PI/2;
+
+
+
+    Vector3d forceFL;
+    Vector3d forceFR;
+    Vector3d forceRL;
+    Vector3d forceRR;
     // cout << "this is q joints " << q_joints;
     // q_desired.tail(12) = q_joints;
 
@@ -149,7 +229,7 @@ int main()
     // q_desired.tail(12).setZero();
     // q_desired(4) = M_PI/4.0;
     // q_desired.head(6).setZero();
-    // q_desired(2) = 1.0;
+    q_desired(2) = q_desired(2)+0.05;
     // q_desired(17) = -M_PI/2;
     // cout << "This is q_desired: " << q_desired; 
     // cout << "This is robot body position:" << robot->positionInWorld("body", Vector3d(0, 0, 0));
@@ -195,6 +275,10 @@ int main()
     runloop = true;
     double control_freq = 1000;
     Sai2Common::LoopTimer timer(control_freq, 1e6);
+    // double startLaunchT;
+
+
+    int counter = 0;
 
     while (runloop)
     {
@@ -206,12 +290,24 @@ int main()
         // update robot 1
         robot->setQ(redis_client.getEigen(JOINT_ANGLES_KEY));
         robot->setDq(redis_client.getEigen(JOINT_VELOCITIES_KEY));
+        forceFL = redis_client.getEigen(FORCE_SENSOR_KEY_FL);
+        forceFR = redis_client.getEigen(FORCE_SENSOR_KEY_FR);
+        forceRL = redis_client.getEigen(FORCE_SENSOR_KEY_RL);
+        forceRR = redis_client.getEigen(FORCE_SENSOR_KEY_RR);
+        
+        // cout<<"This is x force " << forceFL(0) << "\n";
+        // cout<<"This is y force " << forceFL(1) << "\n";
+        // cout<<"This is z force " << forceFL(2) << "\n";
+
         robot->updateModel();
 
         body_rot = robot->rotationInWorld(body_name);
         body_pos = robot->positionInWorld("body", Vector3d(0, 0, 0)); // position of body origin
         body_vel = robot->linearVelocityInWorld("body", Vector3d(0, 0, 0)); // velocity of body origin
         comPos = COM_task->getCurrentPosition();                      // IN WORLD FRAME
+        
+
+        
 
 
         bool safeToExtend = false;
@@ -227,9 +323,9 @@ int main()
             command_torques = joint_task->computeTorques();
             // cout << q_desired;
 
-            if ((robot->q() - q_desired).norm() < 1e-2)
+            if ((robot->q() - q_desired).norm() < 5e-1)
             { // if error between joint angles and desired angles is <error
-                // cout << "Posture To Motion" << endl;
+                // cout << "returned to posture" << endl;
 
                 for (auto name : primary_control_links)
                 {
@@ -246,6 +342,14 @@ int main()
         else if (state == FEET_FIXED_MOTION)
         { // crouching
             // get underactuation matrix
+
+
+            if(startToggleFeetFixedMotion){
+                startTime = time;
+                initialPos = body_pos;
+                initialVel = body_vel;
+                startToggleFeetFixedMotion = false;
+            }
 
             // creates nullspace of feet matrix so that feet don't move
             MatrixXd Jr = MatrixXd::Zero(3 * 4, robot->dof()); // jacobian of feet contacts. 3 translation directions * 4 feet
@@ -275,17 +379,36 @@ int main()
             // -------- set task goals and compute control torques
             command_torques.setZero();
 
-            Vector3d goalPos = Vector3d(0, 0, 0.25);
+
+            goalPos = Vector3d(0,0,0.25);
+            goalVel = Vector3d(0, 0, 0);
+
+            // traj = Vector3d(0,0,0.2);
+
+
+
+            traj = getTraj("linearPos", startTime, time, 0.5, initialPos, initialVel, goalPos, goalVel);
+
+            body_task->setGoalPosition(traj);//GOAL POSITION SETTING---- in robot frame?
+            body_task->setGoalOrientation(neutralOrientation);
+
+
+
+
+
+
+
+            // Vector3d goalPos = Vector3d(0, 0, 0.25);
             // cout << "This is body pos Z: " << body_pos(2) << "\n";
             // cout << "This is COM pos Z: " << comPos(2) << "\n";
             // cout << "This is comPosition(): " << robot->comPosition()(2) << "\n";
-
+            
             // cout << "This is world goal pos Z: " << goalPos(2) << "\n";
             // cout << "This is body pos Z in robot frame " << robot->position("body", Vector3d(0, 0, 0))[2] << "\n";
             if (abs(body_pos(2) - goalPos(2)) > 1e-2)
             {
                 // if (abs(body_pos(2) - goalPos(2)) > 1e-2 )  { //body position
-                body_task->setGoalPosition(robot->position("body", Vector3d(0, 0, 0)) + Vector3d(0,0,-0.05));//GOAL POSITION SETTING
+                body_task->setGoalPosition(body_pos + Vector3d(0, 0, -0.05));//- Vector3d(0,0,(body_pos(2)-goalPos(2))));//GOAL POSITION SETTING
                 // COM_task->setGoalPosition(comPos + Vector3d(0, 0, -0.05)); // GOAL POSITION SETTING---- in robot frame?
 
                 // Vector3d zeroAng = Vector3d::Zero();
@@ -293,11 +416,11 @@ int main()
                 body_task->setGoalOrientation(neutralOrientation);//GOAL ORIENTATION SETTING
                 // COM_task->setGoalOrientation(neutralOrientation);
             }
-            else
-            {
-                // body_task->setGoalPosition(Vector3d(0,0,body_pos(2)));
-                // body_task->setGoalOrientation(neutralOrientation);
-            }
+            // else
+            // {
+            //     // body_task->setGoalPosition(Vector3d(0,0,body_pos(2)));
+            //     // body_task->setGoalOrientation(neutralOrientation);
+            // }
 
             command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
             // command_torques += COM_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector(); // compute joint task torques if DOF isn't filled
@@ -311,8 +434,8 @@ int main()
             //cout << q_desired;
             // cout << "This is COM z: " << comPos(2) << "\n";
             // cout << "This is goal z: " << goalPos(2) << "\n";
-
-            if (abs(body_pos(2) - goalPos(2)) < 1e-2)
+            // cout << body_pos(2)-goalPos(2);
+            if (abs(body_pos(2) - goalPos(2)) < 2e-2)
             {
                 // cout << "crouched" << "\n";
                 safeToExtend = false;
@@ -321,9 +444,9 @@ int main()
                     leg_points[i] = robot->position(primary_control_links[i], primary_control_points[i]);
                     // cout << "This is leg velocity: "  << leg_points[0](2) << "\n";
                 }
-                q_flight = robot->q();
-                cout << "switching state to launch \n";
+                // cout << "switching state to launch \n";
                 body_task->setOriControlGains(800,40,0);
+                body_task->setPosControlGains(600,60,0);//tweak
                 state = LAUNCH;
             }
         }
@@ -356,16 +479,21 @@ int main()
             //     // cout << robot->q();
             //     continue;
             // }
+            if (forceFL(2) >=-0.05&& forceFR(2) >=-0.05 && forceRL(2) >=-0.05 && forceRR(2) >=-0.05)  {
 
-            if (body_vel(2) >= 3.5)  { //3.7
+
+            // if (body_vel(2) >= 3.5)  { //3.7
                 state = FLIGHT;
-                cout << "switched to flight" << "\n";
+                // cout << "switched to flight" << "\n";
                 // joint_task->setGains(0, 40, 0);
-                joint_task->setGains(600, 40, 0); // 18x1 vector for each joint DoF in RADIANS
-                // COM_task->setOriControlGains(400, 40, 0);
-                body_task->setOriControlGains(400,40,0);
+                joint_task->setGains(200, 40, 0); // 18x1 vector for each joint DoF in RADIANS
+                COM_task->setOriControlGains(400, 40, 0);
+                // body_task->setOriControlGains(800,40,0);
                 // cout << "updated gains" << "/n";
                 // cout << robot->q();
+                q_flight = robot->q();
+
+
                 continue;
             }
 
@@ -386,13 +514,16 @@ int main()
             MatrixXd UNr_bar = robot->MInv() * UNr.transpose() *
                                (UNr_pre_inverse).completeOrthogonalDecomposition().pseudoInverse();
 
+
+            Matrix3d randomMatDiag = Matrix3d::Zero();
+            randomMatDiag << cos(M_PI/6.4), 0.0, sin(M_PI/6.4), 0, 1, 0, -sin(M_PI/6.4), 0, cos(M_PI/6.4);
             // update body task
             N_prec.setIdentity();
             // cout << N_prec.rows();
-            body_task->updateTaskModel(N_prec);
-            // COM_task->updateTaskModel(N_prec);
-            N_prec = body_task->getTaskAndPreviousNullspace();
-            // N_prec = COM_task->getTaskAndPreviousNullspace();
+            // body_task->updateTaskModel(N_prec);
+            COM_task->updateTaskModel(N_prec);
+            // N_prec = body_task->getTaskAndPreviousNullspace();
+            N_prec = COM_task->getTaskAndPreviousNullspace();
 
             // redundancy completion
             joint_task->updateTaskModel(N_prec);
@@ -401,23 +532,21 @@ int main()
             command_torques.setZero();
 
             // body_task->setGoalPosition(body_pos + Vector3d(0, 0, 0.1 * sin(2 * M_PI * time)));//original sinusoid vibration.
-            body_task->setGoalPosition(body_pos + Vector3d(0,0,0.5));//GOAL POSITION SETTING needs tweaking
-            // body_task->setGoalLinearVelocity(Vector3d(0, 0, 0.7));
-            body_task->setGoalOrientation(neutralOrientation);
-            // COM_task->setGoalPosition(comPos + Vector3d(0, 0, 0.3)); // GOAL POSITION SETTING needs tweaking
-            // COM_task->setGoalLinearVelocity(Vector3d(0, 0, 0.7));
-            // cout << "jumping" << "\n";
-            // COM_task->setGoalOrientation(neutralOrientation);//GOAL ORIENTATION SETTING
+            // body_task->setGoalPosition(body_pos + Vector3d(0,0,0.4));//GOAL POSITION SETTING needs tweaking
+            // body_task->setGoalLinearVelocity(Vector3d(0, 0, 0.5));
+            // body_task->setGoalOrientation(neutralOrientation);
+            COM_task->setGoalPosition(comPos + Vector3d(0, 0, 0.2)); //0.2 GOAL POSITION SETTING needs tweaking
+            COM_task->setGoalLinearVelocity(Vector3d(0, 0, 0.7));//0.7
+            // cout << "jumping" << "\n"; 
+            COM_task->setGoalOrientation(randomMatDiag);//GOAL ORIENTATION SETTING
 
-            command_torques +=  body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
-            // command_torques += COM_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector(); // compute joint task torques if DOF isn't filled
+            // command_torques +=  body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
+            command_torques += COM_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector(); // compute joint task torques if DOF isn't filled
 
-            if (state == LAUNCH)
-            {
-
-                command_torques = U.transpose() * UNr_bar.transpose() * command_torques; // project underactuation
-                command_torques = command_torques.cwiseMin(torque_limits_max).cwiseMax(torque_limits_min);
-            }
+    
+            command_torques = U.transpose() * UNr_bar.transpose() * command_torques; // project underactuation
+            command_torques = command_torques.cwiseMin(torque_limits_max).cwiseMax(torque_limits_min);
+            
             // else if (state == FLIGHT)
             // {
             //     command_torques = U.transpose() * command_torques; // project underactuation
@@ -433,6 +562,19 @@ int main()
         }
         else if (state == FLIGHT)
         {
+
+            if (forceFL(2) < -0.1 && forceFR(2) < -0.1 && forceRL(2) < -0.1 && forceRR(2) < -0.1)  {
+                state = FALL;
+                // cout << "landing" << "\n"; 
+                body_task->setPosControlGains(600,200,0);
+                body_task->setOriControlGains(600,200,0);
+                joint_task->setGains(300,100,0);
+                COM_task->setPosControlGains(400,40,0);
+                COM_task->setOriControlGains(400,40,0);  
+                q_land = robot->q();
+                // counter++;              
+                continue;
+            }
             // body_task->setOriControlGains(400,40,0);
             // joint_task->setGains(800, 100, 0); // 18x1 vector for each joint DoF in RADIANS
 
@@ -506,58 +648,116 @@ int main()
 
             // body_task->setGoalOrientation(initial_rot);
             // command_torques += joint_task->computeTorques();
-
+            // q_flight(7) = 0;
+            // q_flight(10) = 0;
+            // q_flight(13) = 0;
+            // q_flight(16) = 0;
             q_flight << robot->q().head(6), q_joints;
-
+            // cout << q_joints << "\n";
             command_torques.setZero();
             N_prec.setIdentity();
 
             // cout << "Current Body Z in World " << body_pos(2) << "\n";
-            if (comPos(2) > 0.5)
-            { // if safe to extend, body priority to original position
-                safeToExtend = true;
-                cout << "safe to extend reached";
-                body_task->updateTaskModel(N_prec);
-
-                N_prec = body_task->getTaskAndPreviousNullspace();
+            // if (comPos(2) > 0.5)
+            // { // if safe to extend, body priority to original position
+                // safeToExtend = true;
+                // cout << "safe to extend reached";
+                // body_task->updateTaskModel(N_prec);
                 joint_task->updateTaskModel(N_prec);
+
+                // N_prec = body_task->getTaskAndPreviousNullspace();
+                N_prec = joint_task->getTaskAndPreviousNullspace();
+
+                // joint_task->updateTaskModel(N_prec);
+                body_task->updateTaskModel(N_prec);
+                // COM_task->updateTaskModel(N_prec);
+
+                /****************************************************
+                set joint task to partial such that first 6 aren't being used anymore TO DOOOOOOOOOOO
+                decide on a new q desired--multiply initial q_)desired by underactuation to get underactuated q's*/
+            Matrix3d randomMatDiag = Matrix3d::Zero();
+            randomMatDiag << cos(-M_PI/6), 0.0, sin(-M_PI/6), 0, 1, 0, -sin(-M_PI/6), 0, cos(-M_PI/6);
+                joint_task->setGoalPosition(q_flight); // set joint task to initial joint position
+                body_task->setGoalOrientation(neutralOrientation);
+                // COM_task->setGoalOrientation(neutralOrientation);
+                // cout << "joint priority" << "\n";
+            // }
+            // else
+            // { /// prioritize COM orientation
+            //     safeToExtend = false;
+
+            //     body_task->updateTaskModel(N_prec);
+            //     // COM_task->updateTaskModel(N_prec);
+
+            //     N_prec = body_task->getTaskAndPreviousNullspace();
+            //     // N_prec = COM_task->getTaskAndPreviousNullspace();
+
+            //     joint_task->updateTaskModel(N_prec);
+
+            //     joint_task->setGoalPosition(q_flight); // set joint task to initial joint position
+            //     body_task->setGoalOrientation(neutralOrientation);
+            //     // COM_task->setGoalOrientation(neutralOrientation);
+
+            //     // cout << "body priority" << "\n";
+            // }
+
+            command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
+            // command_torques += COM_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector(); // compute joint task torques if DOF isn't filled
+            // command_torques =  command_torques;                                                                                   // project robot underactuation matrix
+            command_torques.head(6).setZero();
+            command_torques = command_torques.cwiseMin(torque_limits_max).cwiseMax(torque_limits_min);
+            // command_torques.setZero();
+        } else if (state == FALL) {
+            MatrixXd Jr = MatrixXd::Zero(3 * 4, robot->dof()); // jacobian of feet contacts. 3 translation directions * 4 feet
+            for (int i = 0; i < 4; ++i)
+            {
+                Jr.block(3 * i, 0, 3, robot->dof()) = robot->Jv(primary_control_links[i], primary_control_points[i]);
+            }
+            MatrixXd Nr = robot->nullspaceMatrix(Jr); // nullspace of legs, all other motions outside of feet
+            MatrixXd UNr = U * Nr;                    // all robot joints projected across feet null space--now UNr motions won't effect feet location
+            MatrixXd UNr_pre_inverse = UNr * robot->MInv() * UNr.transpose();
+            MatrixXd UNr_bar = robot->MInv() * UNr.transpose() *
+                               (UNr_pre_inverse).completeOrthogonalDecomposition().pseudoInverse();
+
+
+            command_torques.setZero();
+            // cout<< "in fall" << "\n";
+            N_prec.setIdentity();
+            body_task->updateTaskModel(N_prec);
+
+            N_prec = body_task->getTaskAndPreviousNullspace();
+            joint_task->updateTaskModel(N_prec);
 
                 // COM_task->updateTaskModel(N_prec);
 
                 /****************************************************
                 set joint task to partial such that first 6 aren't being used anymore TO DOOOOOOOOOOO
                 decide on a new q desired--multiply initial q_)desired by underactuation to get underactuated q's*/
+            Matrix3d randomMatDiag = Matrix3d::Zero();
+            randomMatDiag << cos(-M_PI/6), 0.0, sin(-M_PI/6), 0, 1, 0, -sin(-M_PI/6), 0, cos(-M_PI/6);
 
-                joint_task->setGoalPosition(q_flight); // set joint task to initial joint position
-                body_task->setGoalOrientation(neutralOrientation);
-                // COM_task->setGoalOrientation(neutralOrientation);
-                // cout << "joint priority" << "\n";
-            }
-            else
-            { /// prioritize COM orientation
-                safeToExtend = false;
 
-                body_task->updateTaskModel(N_prec);
-                // COM_task->updateTaskModel(N_prec);
 
-                N_prec = body_task->getTaskAndPreviousNullspace();
-                // N_prec = COM_task->getTaskAndPreviousNullspace();
+            joint_task->setGoalPosition(q_initial); // set joint task to initial joint position
+            body_task->setGoalOrientation(neutralOrientation);
+            body_task->setGoalPosition(q_initial.head(3));
+            // joint_task->reInitializeTask();
+            command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
+            command_torques = U.transpose()*UNr_bar.transpose() * command_torques; // project underactuation
 
-                joint_task->updateTaskModel(N_prec);
-
-                joint_task->setGoalPosition(q_flight); // set joint task to initial joint position
-                body_task->setGoalOrientation(neutralOrientation);
-                // COM_task->setGoalOrientation(neutralOrientation);
-
-                // cout << "body priority" << "\n";
-            }
-
-            command_torques += body_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce();// robot->jointGravityVector();  // compute joint task torques if DOF isn't filled
-            // command_torques += COM_task->computeTorques() + joint_task->computeTorques() + robot->coriolisForce() + robot->jointGravityVector(); // compute joint task torques if DOF isn't filled
-            // command_torques = U.transpose() * command_torques;                                                                                   // project robot underactuation matrix
             command_torques.head(6).setZero();
             command_torques = command_torques.cwiseMin(torque_limits_max).cwiseMax(torque_limits_min);
-            // command_torques.setZero();
+
+
+            if (body_vel.norm() < 0.02)  {
+                state = POSTURE;
+                body_task->setPosControlGains(400,40,0);
+                body_task->setOriControlGains(40,40,0);
+                joint_task->setGains(400,40,0);
+                COM_task->setPosControlGains(400,40,0);
+                COM_task->setOriControlGains(400,40,0);  
+            }
+
         }
 
         // execute redis write callback
@@ -568,6 +768,4 @@ int main()
     cout << "\nSimulation loop timer stats:\n";
     timer.printInfoPostRun();
     redis_client.setEigen(JOINT_TORQUES_COMMANDED_KEY, 0 * command_torques); // back to floating
-
-    return 0;
 }
