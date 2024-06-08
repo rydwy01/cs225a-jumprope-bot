@@ -408,7 +408,7 @@ int main()
             if (abs(body_pos(2) - goalPos(2)) > 1e-2)
             {
                 // if (abs(body_pos(2) - goalPos(2)) > 1e-2 )  { //body position
-                body_task->setGoalPosition(body_pos + Vector3d(0, 0, -0.05));//- Vector3d(0,0,(body_pos(2)-goalPos(2))));//GOAL POSITION SETTING
+                body_task->setGoalPosition(body_pos + Vector3d(0, 0, -0.07));// 0.05- Vector3d(0,0,(body_pos(2)-goalPos(2))));//GOAL POSITION SETTING
                 // COM_task->setGoalPosition(comPos + Vector3d(0, 0, -0.05)); // GOAL POSITION SETTING---- in robot frame?
 
                 // Vector3d zeroAng = Vector3d::Zero();
@@ -445,8 +445,8 @@ int main()
                     // cout << "This is leg velocity: "  << leg_points[0](2) << "\n";
                 }
                 // cout << "switching state to launch \n";
-                body_task->setOriControlGains(800,40,0);
-                body_task->setPosControlGains(600,60,0);//tweak
+                body_task->setOriControlGains(800,40,0); //800 40
+                body_task->setPosControlGains(660,60,0);//tweak 600 60
                 state = LAUNCH;
             }
         }
@@ -479,7 +479,7 @@ int main()
             //     // cout << robot->q();
             //     continue;
             // }
-            if (forceFL(2) >=-0.05&& forceFR(2) >=-0.05 && forceRL(2) >=-0.05 && forceRR(2) >=-0.05)  {
+            if (forceFL(2) >=-0.05 && forceFR(2) >=-0.05 && forceRL(2) >=-0.05 && forceRR(2) >=-0.05)  {
 
 
             // if (body_vel(2) >= 3.5)  { //3.7
@@ -566,9 +566,9 @@ int main()
             if (forceFL(2) < -0.1 && forceFR(2) < -0.1 && forceRL(2) < -0.1 && forceRR(2) < -0.1)  {
                 state = FALL;
                 // cout << "landing" << "\n"; 
-                body_task->setPosControlGains(600,200,0);
-                body_task->setOriControlGains(600,200,0);
-                joint_task->setGains(300,100,0);
+                body_task->setPosControlGains(600,185,0);
+                body_task->setOriControlGains(600,185,0);
+                joint_task->setGains(350,100,0);
                 COM_task->setPosControlGains(400,40,0);
                 COM_task->setOriControlGains(400,40,0);  
                 q_land = robot->q();
